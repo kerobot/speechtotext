@@ -19,7 +19,6 @@ class MicrophoneStream(object):
     def __init__(self, rate, chunk):
         self._rate = rate
         self._chunk = chunk
-
         # Create a thread-safe buffer of audio data
         self._buff = queue.Queue()
         self.closed = True
@@ -39,9 +38,7 @@ class MicrophoneStream(object):
             # overflow while the calling thread makes network requests, etc.
             stream_callback=self._fill_buffer,
         )
-
         self.closed = False
-
         return self
 
     def __exit__(self, type, value, traceback):
