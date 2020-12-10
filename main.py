@@ -125,8 +125,8 @@ def listen_print_loop(responses):
 
             # Exit recognition if any of the transcribed phrases could be
             # one of our keywords.
-            if re.search(r"\b(exit|quit)\b", transcript, re.I):
-                print("Exiting..")
+            if re.search(r"\b(終了|終わり|おわり)\b", transcript, re.I):
+                print("音声認識：終了中...")
                 break
 
             num_chars_printed = 0
@@ -136,12 +136,18 @@ def main():
     # 参考： https://qiita.com/hotstaff/items/52499d67ee73eb93e7fd
     # 環境変数：GOOGLE_APPLICATION_CREDENTIALSに、JSONファイルパスを設定しておくこと
 
+    print("音声認識：開始中...")
+
     # 言語サポート http://g.co/cloud/speech/docs/languages
     language_code = "ja-JP"
     # 音声検索やコマンドに適したモデル
     model = 'command_and_search'
     # 性能向上オプション（command_and_search で利用可能）
     use_enhanced = True
+    # 音声適応による特定単語の候補指定
+    speech_context = speech.SpeechContext(phrases=["精度","二重"])
+    # 句読点の有効
+    enable_automatic_punctuation = True
 
     client = speech.SpeechClient()
 
@@ -151,11 +157,15 @@ def main():
         language_code=language_code,
         model=model,
         use_enhanced=use_enhanced,
+        speech_contexts=[speech_context],
+        enable_automatic_punctuation=enable_automatic_punctuation,
     )
 
     streaming_config = speech.StreamingRecognitionConfig(
         config=config, interim_results=True
     )
+
+    print("音声認識：開始")
 
     with MicrophoneStream(RATE, CHUNK) as stream:
         audio_generator = stream.generator()
@@ -168,6 +178,8 @@ def main():
 
         # Now, put the transcription responses to use.
         listen_print_loop(responses)
+
+    print("音声認識：終了")
 
 if __name__ == "__main__":
     main()
