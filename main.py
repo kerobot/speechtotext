@@ -17,128 +17,113 @@ class MicrophoneStream(object):
     """Opens a recording stream as a generator yielding the audio chunks."""
 
     def __init__(self, rate, chunk):
+        # 音声レート
         self._rate = rate
+        # フレームバッファサイズ
         self._chunk = chunk
-        # Create a thread-safe buffer of audio data
+        # 音声データを保持するためのスレッドセーフなキューを作成
         self._buff = queue.Queue()
+        # 終了状態とする
         self.closed = True
 
     def __enter__(self):
+        # 音声インターフェースを開始
         self._audio_interface = pyaudio.PyAudio()
+        # 音声ストリームを開始
         self._audio_stream = self._audio_interface.open(
+            # 16bit
             format=pyaudio.paInt16,
-            # The API currently only supports 1-channel (mono) audio
-            # https://goo.gl/z757pE
+            # 1チャンネルのみサポート
             channels=1,
+            # 音声レート(16000Hz)
             rate=self._rate,
+            # 音声入力を対象とする
             input=True,
+            # フレームバッファサイズ（1回に得るサイズ：16000Hz/10であれば100ms分）
             frames_per_buffer=self._chunk,
-            # Run the audio stream asynchronously to fill the buffer object.
-            # This is necessary so that the input device's buffer doesn't
-            # overflow while the calling thread makes network requests, etc.
+            # 音声ストリームから音声データを得るためのコールバックメソッドを指定
             stream_callback=self._fill_buffer,
         )
+        # 開始状態とする
         self.closed = False
         return self
 
     def __exit__(self, type, value, traceback):
+        # 音声ストリームを停止
         self._audio_stream.stop_stream()
+        # 音声ストリームを閉じる
         self._audio_stream.close()
+        # 終了状態とすることで、generatorを終了させる
         self.closed = True
-        # Signal the generator to terminate so that the client's
-        # streaming_recognize method will not block the process termination.
+        # キューにNoneを追加することで、generatorを終了させる
         self._buff.put(None)
+        # 音声インターフェースを終了
         self._audio_interface.terminate()
 
     def _fill_buffer(self, in_data, frame_count, time_info, status_flags):
-        """Continuously collect data from the audio stream, into the buffer."""
+        # コールバックメソッドとして、音声ストリームからキューに対して音声データを追加
         self._buff.put(in_data)
         return None, pyaudio.paContinue
 
     def generator(self):
         while not self.closed:
-            # Use a blocking get() to ensure there's at least one chunk of
-            # data, and stop iteration if the chunk is None, indicating the
-            # end of the audio stream.
+            # キューから音声データが取得できるまでブロック
             chunk = self._buff.get()
+            # キューから取得した音声データがNoneの場合はgenerator終了
             if chunk is None:
                 return
+            # ブロックして取得した音声データを保持
             data = [chunk]
-
-            # Now consume whatever other data's still buffered.
+            # キューに溜まっている残りの音声データもすべて取得
             while True:
                 try:
+                    # キューから音声データをブロックせずに取得（取得できなければ例外送出）
                     chunk = self._buff.get(block=False)
+                    # キューから取得した音声データがNoneの場合はgenerator終了
                     if chunk is None:
                         return
+                    # 取得した音声データを追加
                     data.append(chunk)
                 except queue.Empty:
+                    # キューが空の場合はキューからの音声データの取得を終了
                     break
-
+            # キューから取得した音声データを結合したものをyield返却
             yield b"".join(data)
 
 def listen_print_loop(responses):
-    """Iterates through server responses and prints them.
-
-    The responses passed is a generator that will block until a response
-    is provided by the server.
-
-    Each response may contain multiple results, and each result may contain
-    multiple alternatives; for details, see https://goo.gl/tjCPAU.  Here we
-    print only the transcription for the top alternative of the top result.
-
-    In this case, responses are provided for interim results as well. If the
-    response is an interim one, print a line feed at the end of it, to allow
-    the next result to overwrite it, until the response is a final one. For the
-    final one, print a newline to preserve the finalized transcription.
-    """
     num_chars_printed = 0
     for response in responses:
         if not response.results:
             continue
-
-        # The `results` list is consecutive. For streaming, we only care about
-        # the first result being considered, since once it's `is_final`, it
-        # moves on to considering the next utterance.
+        # 音声認識の連続した結果を取得
         result = response.results[0]
         if not result.alternatives:
             continue
-
-        # Display the transcription of the top alternative.
+        # 結果のひとつから変換文字列を取得
         transcript = result.alternatives[0].transcript
-
-        # Display interim results, but with a carriage return at the end of the
-        # line, so subsequent lines will overwrite them.
-        #
-        # If the previous result was longer than this one, we need to print
-        # some extra spaces to overwrite the previous result
+        # 前回の印字文字数-変換文字数から、上書きする空白文字列を作成
         overwrite_chars = " " * (num_chars_printed - len(transcript))
-
         if not result.is_final:
+            # 発話中は変換文字列+上書きする空白文字列を印字＋フラッシュ
             sys.stdout.write(transcript + overwrite_chars + "\r")
             sys.stdout.flush()
-
+            # 今回の印字文字数を更新
             num_chars_printed = len(transcript)
-
         else:
+            # 発話終了時は変換文字列+上書きする空白文字列を印字＋改行
             print(transcript + overwrite_chars)
-
-            # Exit recognition if any of the transcribed phrases could be
-            # one of our keywords.
+            # 変換文字列が以下の場合は処理を終了する
             if re.search(r"\b(終了|終わり|おわり)\b", transcript, re.I):
                 print("音声認識：終了中...")
                 break
-
+            # 今回の印字文字数をリセット
             num_chars_printed = 0
 
 def main():
-    # 参考： https://tech-blog.optim.co.jp/entry/2020/02/21/163000
-    # 参考： https://qiita.com/hotstaff/items/52499d67ee73eb93e7fd
     # 環境変数：GOOGLE_APPLICATION_CREDENTIALSに、JSONファイルパスを設定しておくこと
-
     print("音声認識：開始中...")
 
-    # 言語サポート http://g.co/cloud/speech/docs/languages
+    # 言語コード http://g.co/cloud/speech/docs/languages
     language_code = "ja-JP"
     # 音声検索やコマンドに適したモデル
     model = 'command_and_search'
@@ -148,9 +133,9 @@ def main():
     speech_context = speech.SpeechContext(phrases=["精度","二重"])
     # 句読点の有効
     enable_automatic_punctuation = True
-
+    # Google の Speech to text クライアント
     client = speech.SpeechClient()
-
+    # Google の Speech to text の設定
     config = speech.RecognitionConfig(
         encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
         sample_rate_hertz=RATE,
@@ -160,23 +145,26 @@ def main():
         speech_contexts=[speech_context],
         enable_automatic_punctuation=enable_automatic_punctuation,
     )
-
+    # Google の Speech to text の設定を指定し、発話途中の認識結果を有効化
     streaming_config = speech.StreamingRecognitionConfig(
         config=config, interim_results=True
     )
 
     print("音声認識：開始")
 
+    # 音声レートとフレームバッファサイズを指定してストリームを開始
     with MicrophoneStream(RATE, CHUNK) as stream:
+        # generatorメソッドを得る
         audio_generator = stream.generator()
+        # generatorメソッドがyield返却した音声データを音声認識するジェネレーター式から
+        # ジェネレーターオブジェクトを作成（入力オブジェクト）
         requests = (
             speech.StreamingRecognizeRequest(audio_content=content)
             for content in audio_generator
         )
-
+        # 設定と入力オブジェクトを指定して音声認識を実行
         responses = client.streaming_recognize(streaming_config, requests) #pylint: disable=too-many-function-args
-
-        # Now, put the transcription responses to use.
+        # 音声認識の結果を表示
         listen_print_loop(responses)
 
     print("音声認識：終了")
